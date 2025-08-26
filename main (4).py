@@ -41,7 +41,7 @@ except pytz.UnknownTimeZoneError:
 # Config
 # =====================
 # नया और सुरक्षित तरीका
-TOKEN = "8321548453:AAGcbJl0r6lu5Lmbv3RT8VuDcU2wV3eXH34"  # अपना बॉट टोकन डालें
+TOKEN = "7624784085:AAG3TTp5yYvnwbYz2SW4ZcWtwlRL8jUKT28"  # अपना बॉट टोकन डालें
 ADMIN_IDS = [5865209445]           # अपने Telegram User IDs
 OWNER_ID = 5865209445  # अपना ID
 
@@ -56,49 +56,7 @@ BATCH_SIZE = 30
 
 DB_NAME = "bot_data.db"
 
-class MessageQueue:
-    def __init__(self, redis_client):
-        """
-        Accepts an already connected redis client.
-        """
-        self.redis_client = redis_client
 
-    def enqueue(self, button_id: str, message_data: dict):
-        """
-        Add a message to queue: lpush (left push), we will pop from right for FIFO.
-        """
-        key = f"queue:{button_id}"
-        # हम pickle का उपयोग कर रहे हैं, इसलिए डेटा बाइनरी होना चाहिए
-        self.redis_client.lpush(key, pickle.dumps(message_data))
-
-    def dequeue_batch(self, button_id: str, batch_size: int) -> List[dict]:
-        """
-        Pop up to batch_size messages in FIFO order from Redis.
-        """
-        key = f"queue:{button_id}"
-        messages = []
-        for _ in range(batch_size):
-            raw = self.redis_client.rpop(key)
-            if not raw:
-                break
-            # बाइनरी डेटा को वापस ऑब्जेक्ट में बदलें
-            messages.append(pickle.loads(raw))
-        return messages
-
-    def queue_size(self, button_id: str) -> int:
-        key = f"queue:{button_id}"
-        return int(self.redis_client.llen(key))
-
-# अभी message_queue को यहां initialize न करें, हम इसे main() में करेंगे
-# message_queue = MessageQueue() <--- इस लाइन को भी हटाएं या कमेंट कर दें
-
-
-        
-        # URL से Redis क्लाइंट बनाएं (decode_responses को False रखें क्योंकि आप pickle का उपयोग कर रहे हैं)
-        self.redis_client = redis.from_url(redis_url, decode_responses=False)
-
-
- 
 # =====================
 # SQLite only for Metadata (channels, schedules, users)
 # =====================
@@ -106,7 +64,7 @@ def init_db() -> None:
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
-    # messages table हटाया गया है (Redis queue use हो रही है)
+    # messages table हटाया गया है (SQlite queue use हो रही है)
     c.execute("""
         CREATE TABLE IF NOT EXISTS channels (
             id INTEGER PRIMARY KEY,
@@ -201,22 +159,42 @@ def is_valid_time_str(s: str) -> bool:
 
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        # सुरक्षित तरीके से यूजर की जाँच करें
         user = getattr(update, 'effective_user', None)
         
-        if not user or user.id != OWNER_ID:
-            # अगर कोई यूजर नहीं है, तो कुछ भी न करें
-            if not user:
-                print("DEBUG: Update received without a user. Ignoring.")
-                return
+        if not user:
+            print("DEBUG: Update received without a user. Ignoring.")
+            return
 
-            # अगर यूजर ओनर नहीं है, तो मैसेज भेजें
+        if user.id != OWNER_ID:
+            # --- अनधिकृत पहुंच का प्रयास ---
+            print(f"Unauthorized access attempt by user {user.id} ({user.username or 'N/A'}).")
+            
+            # उपयोगकर्ता को संदेश भेजें
             if update.effective_message:
                 await update.effective_message.reply_text(
                     "❌ आप इस बॉट को use नहीं कर सकते!\nकृपया Owner से contact करें।"
                 )
-            return
             
+            # एडमिन को सूचना भेजें
+            alert_message = (
+                f"⚠️ *अनधिकृत पहुंच का प्रयास* ⚠️\n\n"
+                f"*User ID:* `{user.id}`\n"
+                f"*Username:* @{user.username or 'N/A'}\n"
+                f"*First Name:* {user.first_name}"
+            )
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=alert_message,
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send unauthorized access alert to admin {admin_id}: {e}")
+            # --------------------------------
+
+            return # फंक्शन को आगे न चलाएं
+
         # अगर यूजर ओनर है, तो ही असली फंक्शन चलाएं
         return await func(update, context, *args, **kwargs)
     return wrapper
@@ -225,7 +203,7 @@ def owner_only(func):
 
 
 # =====================
-# Status (async) - uses Redis and SQLite
+# Status (async) - uses SQliteand SQLite
 # =====================
 async def get_button_status(button_id: str) -> str:
     channels = await db_fetchall("SELECT channel_id FROM channels WHERE button_id=?", (button_id,))
@@ -325,7 +303,7 @@ async def empty_queue_reminder(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"empty_queue_reminder error: {e}")
 
 # =====================
-# Forwarding Job - uses Redis queue
+# Forwarding Job - uses SQlitequeue
 # =====================
 async def forward_messages_job(context: ContextTypes.DEFAULT_TYPE):
     """
